@@ -3,6 +3,7 @@ Our exception hierarchy:
 
 * HTTPError
   x RequestError
+    + CircuitBreakerOpen
     + TransportError
       - TimeoutException
         · ConnectTimeout
@@ -40,6 +41,7 @@ if typing.TYPE_CHECKING:
     from ._models import Request, Response  # pragma: no cover
 
 __all__ = [
+    "CircuitBreakerOpen",
     "CloseError",
     "ConnectError",
     "ConnectTimeout",
@@ -118,6 +120,13 @@ class RequestError(HTTPError):
         # Response methods in order to ensure that any raised exceptions
         # have a `.request` property set on them.
         self._request = request
+
+
+class CircuitBreakerOpen(RequestError):
+    """
+    Raised when a client-level circuit breaker is open for the request
+    origin, so the request fails fast without being sent to the transport.
+    """
 
 
 class TransportError(RequestError):

@@ -1,6 +1,7 @@
 from .__version__ import __description__, __title__, __version__
 from ._api import *
 from ._auth import *
+from ._circuit_breaker import *
 from ._client import *
 from ._config import *
 from ._content import *
@@ -39,6 +40,9 @@ __all__ = [
     "BaseTransport",
     "BasicAuth",
     "ByteStream",
+    "CircuitBreaker",
+    "CircuitBreakerOpen",
+    "CircuitState",
     "Client",
     "CloseError",
     "codes",

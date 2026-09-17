@@ -11,6 +11,11 @@ from types import TracebackType
 
 from .__version__ import __version__
 from ._auth import Auth, BasicAuth, FunctionAuth
+from ._circuit_breaker import (
+    CircuitBreaker,
+    _CircuitBreakerAsyncStream,
+    _CircuitBreakerSyncStream,
+)
 from ._config import (
     DEFAULT_LIMITS,
     DEFAULT_MAX_REDIRECTS,
@@ -22,7 +27,9 @@ from ._config import (
 from ._decoders import SUPPORTED_DECODERS
 from ._exceptions import (
     InvalidURL,
+    NetworkError,
     RemoteProtocolError,
+    TimeoutException,
     TooManyRedirects,
     request_context,
 )
@@ -116,6 +123,11 @@ USE_CLIENT_DEFAULT = UseClientDefault()
 
 logger = logging.getLogger("httpx")
 
+# Transport-level failures accounted for by the client-level circuit breaker:
+# network/connection errors and timeouts. Failure response status codes are
+# accounted for separately, once the response body has been read.
+_CIRCUIT_BREAKER_FAILURE_EXCEPTIONS = (NetworkError, TimeoutException)
+
 USER_AGENT = f"python-httpx/{__version__}"
 ACCEPT_ENCODING = ", ".join(
     [key for key in SUPPORTED_DECODERS.keys() if key != "identity"]
@@ -200,8 +212,14 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
+
+        if circuit_breaker is not None and not isinstance(
+            circuit_breaker, CircuitBreaker
+        ):
+            raise TypeError(f'Invalid "circuit_breaker" argument: {circuit_breaker!r}')
 
         self._base_url = self._enforce_trailing_slash(URL(base_url))
 
@@ -218,7 +236,15 @@ class BaseClient:
         }
         self._trust_env = trust_env
         self._default_encoding = default_encoding
+        self._circuit_breaker = circuit_breaker
         self._state = ClientState.UNOPENED
+
+    @property
+    def circuit_breaker(self) -> CircuitBreaker | None:
+        """
+        The client-level circuit breaker policy, if one was configured.
+        """
+        return self._circuit_breaker
 
     @property
     def is_closed(self) -> bool:
@@ -590,6 +616,41 @@ class BaseClient:
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
 
+    def _mark_streaming_response(self, response: Response) -> None:
+        """
+        A response handed back to the caller without being read is only
+        accounted for by the circuit breaker if its body genuinely fails
+        while being streamed - a failure status code alone is not counted.
+        """
+        if self._circuit_breaker is None or not isinstance(
+            response.stream,
+            (_CircuitBreakerSyncStream, _CircuitBreakerAsyncStream),
+        ):
+            return
+
+        tracked_stream = response.stream
+        # Status codes never fail a streamed response; the breaker is only
+        # informed if the response body genuinely fails while being read.
+        tracked_stream.count_status_failures = False
+
+        # A response returned already fully buffered (and hence already
+        # closed, e.g. by MockTransport) will never drive the tracked
+        # stream, so release any half-open probe the request represented.
+        if response.is_closed:
+            tracked_stream.dismiss()
+
+    def _settle_response(self, response: Response) -> None:
+        """
+        Report the outcome of a buffered response that was not iterated
+        through the breaker-aware stream (e.g. one returned pre-read by a
+        transport). No-op once the stream has already reported its outcome.
+        """
+        if self._circuit_breaker is not None and isinstance(
+            response.stream,
+            (_CircuitBreakerSyncStream, _CircuitBreakerAsyncStream),
+        ):
+            response.stream.settle()
+
 
 class Client(BaseClient):
     """
@@ -634,6 +695,9 @@ class Client(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **circuit_breaker** - *(optional)* A `CircuitBreaker` policy tracking
+    failures per origin, failing fast while a dependency is unavailable and
+    probing recovery after a cooldown.
     """
 
     def __init__(
@@ -658,6 +722,7 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,6 +736,7 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            circuit_breaker=circuit_breaker,
         )
 
         if http2:
@@ -920,6 +986,9 @@ class Client(BaseClient):
         try:
             if not stream:
                 response.read()
+                self._settle_response(response)
+            else:
+                self._mark_streaming_response(response)
 
             return response
 
@@ -1004,21 +1073,46 @@ class Client(BaseClient):
         """
         transport = self._transport_for_url(request.url)
         start = time.perf_counter()
+        circuit_breaker = self._circuit_breaker
 
         if not isinstance(request.stream, SyncByteStream):
             raise RuntimeError(
                 "Attempted to send an async request with a sync Client instance."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        if circuit_breaker is not None:
+            # May raise CircuitBreakerOpen to fail fast before the transport
+            # is contacted.
+            circuit_breaker.before_request(request)
+
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        except _CIRCUIT_BREAKER_FAILURE_EXCEPTIONS:
+            if circuit_breaker is not None:
+                circuit_breaker.record_failure(request)
+            raise
+        except BaseException:
+            # Release a half-open probe for any other exception (e.g. a
+            # protocol error or cancellation) so the breaker cannot get
+            # stuck waiting for an outcome that never arrives.
+            if circuit_breaker is not None:
+                circuit_breaker.record_inconclusive(request)
+            raise
 
         assert isinstance(response.stream, SyncByteStream)
 
         response.request = request
-        response.stream = BoundSyncStream(
-            response.stream, response=response, start=start
-        )
+        bound_stream = BoundSyncStream(response.stream, response=response, start=start)
+        if circuit_breaker is None:
+            response.stream = bound_stream
+        else:
+            response.stream = _CircuitBreakerSyncStream(
+                bound_stream,
+                breaker=circuit_breaker,
+                request=request,
+                status_code=response.status_code,
+            )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 
@@ -1348,6 +1442,9 @@ class AsyncClient(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **circuit_breaker** - *(optional)* A `CircuitBreaker` policy tracking
+    failures per origin, failing fast while a dependency is unavailable and
+    probing recovery after a cooldown.
     """
 
     def __init__(
@@ -1372,6 +1469,7 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,6 +1483,7 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            circuit_breaker=circuit_breaker,
         )
 
         if http2:
@@ -1635,6 +1734,9 @@ class AsyncClient(BaseClient):
         try:
             if not stream:
                 await response.aread()
+                self._settle_response(response)
+            else:
+                self._mark_streaming_response(response)
 
             return response
 
@@ -1720,20 +1822,45 @@ class AsyncClient(BaseClient):
         """
         transport = self._transport_for_url(request.url)
         start = time.perf_counter()
+        circuit_breaker = self._circuit_breaker
 
         if not isinstance(request.stream, AsyncByteStream):
             raise RuntimeError(
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        if circuit_breaker is not None:
+            # May raise CircuitBreakerOpen to fail fast before the transport
+            # is contacted.
+            circuit_breaker.before_request(request)
+
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        except _CIRCUIT_BREAKER_FAILURE_EXCEPTIONS:
+            if circuit_breaker is not None:
+                circuit_breaker.record_failure(request)
+            raise
+        except BaseException:
+            # Release a half-open probe for any other exception (e.g. a
+            # protocol error or cancellation) so the breaker cannot get
+            # stuck waiting for an outcome that never arrives.
+            if circuit_breaker is not None:
+                circuit_breaker.record_inconclusive(request)
+            raise
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
-        response.stream = BoundAsyncStream(
-            response.stream, response=response, start=start
-        )
+        bound_stream = BoundAsyncStream(response.stream, response=response, start=start)
+        if circuit_breaker is None:
+            response.stream = bound_stream
+        else:
+            response.stream = _CircuitBreakerAsyncStream(
+                bound_stream,
+                breaker=circuit_breaker,
+                request=request,
+                status_code=response.status_code,
+            )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 
