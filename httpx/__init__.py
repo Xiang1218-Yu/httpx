@@ -6,6 +6,7 @@ from ._config import *
 from ._content import *
 from ._exceptions import *
 from ._models import *
+from ._quota import *
 from ._status_codes import *
 from ._transports import *
 from ._types import *
@@ -35,6 +36,7 @@ __all__ = [
     "AsyncByteStream",
     "AsyncClient",
     "AsyncHTTPTransport",
+    "AsyncOriginQuotaLimiter",
     "Auth",
     "BaseTransport",
     "BasicAuth",
@@ -65,6 +67,7 @@ __all__ = [
     "NetRCAuth",
     "NetworkError",
     "options",
+    "OriginQuota",
     "patch",
     "PoolTimeout",
     "post",
@@ -73,6 +76,8 @@ __all__ = [
     "ProxyError",
     "put",
     "QueryParams",
+    "QuotaRejected",
+    "QuotaStatus",
     "ReadError",
     "ReadTimeout",
     "RemoteProtocolError",
@@ -87,6 +92,7 @@ __all__ = [
     "StreamConsumed",
     "StreamError",
     "SyncByteStream",
+    "SyncOriginQuotaLimiter",
     "Timeout",
     "TimeoutException",
     "TooManyRedirects",

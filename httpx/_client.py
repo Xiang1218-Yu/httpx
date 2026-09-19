@@ -27,6 +27,13 @@ from ._exceptions import (
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
+from ._quota import (
+    AsyncOriginQuotaLimiter,
+    OriginQuota,
+    QuotaReleaseAsyncStream,
+    QuotaReleaseSyncStream,
+    SyncOriginQuotaLimiter,
+)
 from ._status_codes import codes
 from ._transports.base import AsyncBaseTransport, BaseTransport
 from ._transports.default import AsyncHTTPTransport, HTTPTransport
@@ -200,6 +207,7 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        origin_quota: OriginQuota | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
 
@@ -218,6 +226,10 @@ class BaseClient:
         }
         self._trust_env = trust_env
         self._default_encoding = default_encoding
+        self._origin_quota = origin_quota
+        self._quota: (
+            SyncOriginQuotaLimiter | AsyncOriginQuotaLimiter | None
+        ) = None
         self._state = ClientState.UNOPENED
 
     @property
@@ -226,6 +238,20 @@ class BaseClient:
         Check if the client being closed
         """
         return self._state == ClientState.CLOSED
+
+    @property
+    def quota(
+        self,
+    ) -> SyncOriginQuotaLimiter | AsyncOriginQuotaLimiter | None:
+        """
+        The per-origin concurrency quota limiter, or `None` if no
+        `origin_quota` was configured.
+
+        Use `quota.statuses()` / `quota.status(origin)` to inspect occupancy
+        and queue depth, and `quota.reject(...)` to explicitly reject
+        requests that are currently waiting.
+        """
+        return self._quota
 
     @property
     def trust_env(self) -> bool:
@@ -634,7 +660,13 @@ class Client(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **origin_quota** - *(optional)* An `OriginQuota` configuration that limits
+    the number of concurrent in-flight requests per host/origin, queueing any
+    excess at the client boundary instead of overwhelming the connection pool
+    and server.
     """
+
+    _quota: SyncOriginQuotaLimiter | None
 
     def __init__(
         self,
@@ -658,6 +690,7 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        origin_quota: OriginQuota | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,7 +704,11 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            origin_quota=origin_quota,
         )
+
+        if origin_quota is not None:
+            self._quota = SyncOriginQuotaLimiter(origin_quota)
 
         if http2:
             try:
@@ -1010,12 +1047,33 @@ class Client(BaseClient):
                 "Attempted to send an async request with a sync Client instance."
             )
 
+        limiter = self._quota
         with request_context(request=request):
-            response = transport.handle_request(request)
+            quota_token = (
+                limiter.acquire(request.url) if limiter is not None else None
+            )
+            try:
+                response = transport.handle_request(request)
+            except BaseException:
+                if limiter is not None and quota_token is not None:
+                    limiter.release(quota_token)
+                raise
 
         assert isinstance(response.stream, SyncByteStream)
 
         response.request = request
+        if limiter is not None and quota_token is not None:
+            if response.is_closed:
+                # The body was already fully consumed within the transport
+                # (e.g. a MockTransport returning buffered content), so the
+                # slot can be released immediately.
+                limiter.release(quota_token)
+            else:
+                # Hold the quota slot for the lifetime of the response, so
+                # that streaming responses count as in-flight until closed.
+                response.stream = QuotaReleaseSyncStream(
+                    response.stream, limiter, quota_token
+                )
         response.stream = BoundSyncStream(
             response.stream, response=response, start=start
         )
@@ -1267,6 +1325,8 @@ class Client(BaseClient):
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
+            if self._quota is not None:
+                self._quota.close()
             self._transport.close()
             for transport in self._mounts.values():
                 if transport is not None:
@@ -1298,6 +1358,8 @@ class Client(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
+        if self._quota is not None:
+            self._quota.close()
         self._transport.__exit__(exc_type, exc_value, traceback)
         for transport in self._mounts.values():
             if transport is not None:
@@ -1348,7 +1410,13 @@ class AsyncClient(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **origin_quota** - *(optional)* An `OriginQuota` configuration that limits
+    the number of concurrent in-flight requests per host/origin, queueing any
+    excess at the client boundary instead of overwhelming the connection pool
+    and server.
     """
+
+    _quota: AsyncOriginQuotaLimiter | None
 
     def __init__(
         self,
@@ -1372,6 +1440,7 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        origin_quota: OriginQuota | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,7 +1454,11 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            origin_quota=origin_quota,
         )
+
+        if origin_quota is not None:
+            self._quota = AsyncOriginQuotaLimiter(origin_quota)
 
         if http2:
             try:
@@ -1726,11 +1799,32 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
+        limiter = self._quota
         with request_context(request=request):
-            response = await transport.handle_async_request(request)
+            quota_token = (
+                await limiter.acquire(request.url) if limiter is not None else None
+            )
+            try:
+                response = await transport.handle_async_request(request)
+            except BaseException:
+                if limiter is not None and quota_token is not None:
+                    await limiter.release(quota_token)
+                raise
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
+        if limiter is not None and quota_token is not None:
+            if response.is_closed:
+                # The body was already fully consumed within the transport
+                # (e.g. a MockTransport returning buffered content), so the
+                # slot can be released immediately.
+                await limiter.release(quota_token)
+            else:
+                # Hold the quota slot for the lifetime of the response, so
+                # that streaming responses count as in-flight until closed.
+                response.stream = QuotaReleaseAsyncStream(
+                    response.stream, limiter, quota_token
+                )
         response.stream = BoundAsyncStream(
             response.stream, response=response, start=start
         )
@@ -1982,6 +2076,8 @@ class AsyncClient(BaseClient):
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
+            if self._quota is not None:
+                await self._quota.aclose()
             await self._transport.aclose()
             for proxy in self._mounts.values():
                 if proxy is not None:
@@ -2013,6 +2109,8 @@ class AsyncClient(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
+        if self._quota is not None:
+            await self._quota.aclose()
         await self._transport.__aexit__(exc_type, exc_value, traceback)
         for proxy in self._mounts.values():
             if proxy is not None:

@@ -21,6 +21,7 @@ Our exception hierarchy:
       - UnsupportedProtocol
     + DecodingError
     + TooManyRedirects
+    + QuotaRejected
   x HTTPStatusError
 * InvalidURL
 * CookieConflict
@@ -53,6 +54,7 @@ __all__ = [
     "PoolTimeout",
     "ProtocolError",
     "ProxyError",
+    "QuotaRejected",
     "ReadError",
     "ReadTimeout",
     "RemoteProtocolError",
@@ -250,6 +252,45 @@ class TooManyRedirects(RequestError):
     """
     Too many redirects.
     """
+
+
+class QuotaRejected(RequestError):
+    """
+    A request could not be admitted under the client's per-origin
+    concurrency quota.
+
+    The `reason` attribute indicates why the request was rejected:
+
+    * `QuotaRejected.REASON_QUEUE_FULL` (`"queue_full"`) - too many requests
+      were already waiting.
+    * `QuotaRejected.REASON_QUEUE_TIMEOUT` (`"queue_timeout"`) - the request
+      waited in the queue for longer than the configured `queue_timeout`.
+    * `QuotaRejected.REASON_CLIENT_CLOSED` (`"client_closed"`) - the client
+      was closed while the request waited.
+    * `QuotaRejected.REASON_REJECTED` (`"rejected"`) - the waiting requests
+      were explicitly rejected.
+    * Any other custom reason supplied to `reject()`.
+
+    The `origin` attribute is the textual origin (`scheme://host:port`)
+    the request was queued against.
+    """
+
+    REASON_QUEUE_FULL = "queue_full"
+    REASON_QUEUE_TIMEOUT = "queue_timeout"
+    REASON_CLIENT_CLOSED = "client_closed"
+    REASON_REJECTED = "rejected"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        origin: str | None = None,
+        reason: str | None = None,
+        request: Request | None = None,
+    ) -> None:
+        super().__init__(message, request=request)
+        self.origin = origin
+        self.reason = reason
 
 
 # Client errors
