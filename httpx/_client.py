@@ -28,6 +28,7 @@ from ._exceptions import (
 )
 from ._models import Cookies, Headers, Request, Response
 from ._status_codes import codes
+from ._tls import TLSPolicyResolverTypes
 from ._transports.base import AsyncBaseTransport, BaseTransport
 from ._transports.default import AsyncHTTPTransport, HTTPTransport
 from ._types import (
@@ -629,6 +630,9 @@ class Client(BaseClient):
     request URLs.
     * **transport** - *(optional)* A transport class to use for sending requests
     over the network.
+    * **tls_policy** - *(optional)* A TLSPolicyResolver selecting the CA bundle,
+    client certificate, ALPN and hostname verification policy per target origin.
+    Cannot be used together with a custom 'transport'.
     * **trust_env** - *(optional)* Enables or disables usage of environment
     variables for configuration.
     * **default_encoding** - *(optional)* The default encoding to use for decoding
@@ -657,6 +661,7 @@ class Client(BaseClient):
         event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None,
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
+        tls_policy: TLSPolicyResolverTypes | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
     ) -> None:
         super().__init__(
@@ -682,6 +687,13 @@ class Client(BaseClient):
                     "Make sure to install httpx using `pip install httpx[http2]`."
                 ) from None
 
+        if transport is not None and tls_policy is not None:
+            raise ValueError(
+                "Cannot use 'tls_policy' together with an explicit 'transport'. "
+                "Pass 'tls_policy' to a custom httpx.HTTPTransport instance "
+                "instead."
+            )
+
         allow_env_proxies = trust_env and transport is None
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
@@ -693,6 +705,7 @@ class Client(BaseClient):
             http2=http2,
             limits=limits,
             transport=transport,
+            tls_policy=tls_policy,
         )
         self._mounts: dict[URLPattern, BaseTransport | None] = {
             URLPattern(key): None
@@ -705,6 +718,7 @@ class Client(BaseClient):
                 http1=http1,
                 http2=http2,
                 limits=limits,
+                tls_policy=tls_policy,
             )
             for key, proxy in proxy_map.items()
         }
@@ -724,6 +738,7 @@ class Client(BaseClient):
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
         transport: BaseTransport | None = None,
+        tls_policy: TLSPolicyResolverTypes | None = None,
     ) -> BaseTransport:
         if transport is not None:
             return transport
@@ -735,6 +750,7 @@ class Client(BaseClient):
             http1=http1,
             http2=http2,
             limits=limits,
+            tls_policy=tls_policy,
         )
 
     def _init_proxy_transport(
@@ -746,6 +762,7 @@ class Client(BaseClient):
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
+        tls_policy: TLSPolicyResolverTypes | None = None,
     ) -> BaseTransport:
         return HTTPTransport(
             verify=verify,
@@ -755,6 +772,7 @@ class Client(BaseClient):
             http2=http2,
             limits=limits,
             proxy=proxy,
+            tls_policy=tls_policy,
         )
 
     def _transport_for_url(self, url: URL) -> BaseTransport:
@@ -1343,6 +1361,9 @@ class AsyncClient(BaseClient):
     request URLs.
     * **transport** - *(optional)* A transport class to use for sending requests
     over the network.
+    * **tls_policy** - *(optional)* A TLSPolicyResolver selecting the CA bundle,
+    client certificate, ALPN and hostname verification policy per target origin.
+    Cannot be used together with a custom 'transport'.
     * **trust_env** - *(optional)* Enables or disables usage of environment
     variables for configuration.
     * **default_encoding** - *(optional)* The default encoding to use for decoding
@@ -1370,6 +1391,7 @@ class AsyncClient(BaseClient):
         event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None,
         base_url: URL | str = "",
         transport: AsyncBaseTransport | None = None,
+        tls_policy: TLSPolicyResolverTypes | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
     ) -> None:
@@ -1396,6 +1418,13 @@ class AsyncClient(BaseClient):
                     "Make sure to install httpx using `pip install httpx[http2]`."
                 ) from None
 
+        if transport is not None and tls_policy is not None:
+            raise ValueError(
+                "Cannot use 'tls_policy' together with an explicit 'transport'. "
+                "Pass 'tls_policy' to a custom httpx.AsyncHTTPTransport "
+                "instance instead."
+            )
+
         allow_env_proxies = trust_env and transport is None
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
@@ -1407,6 +1436,7 @@ class AsyncClient(BaseClient):
             http2=http2,
             limits=limits,
             transport=transport,
+            tls_policy=tls_policy,
         )
 
         self._mounts: dict[URLPattern, AsyncBaseTransport | None] = {
@@ -1420,6 +1450,7 @@ class AsyncClient(BaseClient):
                 http1=http1,
                 http2=http2,
                 limits=limits,
+                tls_policy=tls_policy,
             )
             for key, proxy in proxy_map.items()
         }
@@ -1438,6 +1469,7 @@ class AsyncClient(BaseClient):
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
         transport: AsyncBaseTransport | None = None,
+        tls_policy: TLSPolicyResolverTypes | None = None,
     ) -> AsyncBaseTransport:
         if transport is not None:
             return transport
@@ -1449,6 +1481,7 @@ class AsyncClient(BaseClient):
             http1=http1,
             http2=http2,
             limits=limits,
+            tls_policy=tls_policy,
         )
 
     def _init_proxy_transport(
@@ -1460,6 +1493,7 @@ class AsyncClient(BaseClient):
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
+        tls_policy: TLSPolicyResolverTypes | None = None,
     ) -> AsyncBaseTransport:
         return AsyncHTTPTransport(
             verify=verify,
@@ -1469,6 +1503,7 @@ class AsyncClient(BaseClient):
             http2=http2,
             limits=limits,
             proxy=proxy,
+            tls_policy=tls_policy,
         )
 
     def _transport_for_url(self, url: URL) -> AsyncBaseTransport:

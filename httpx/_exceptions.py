@@ -18,6 +18,7 @@ Our exception hierarchy:
         · LocalProtocolError
         · RemoteProtocolError
       - ProxyError
+      - TLSPolicyError
       - UnsupportedProtocol
     + DecodingError
     + TooManyRedirects
@@ -63,6 +64,7 @@ __all__ = [
     "StreamConsumed",
     "StreamError",
     "TimeoutException",
+    "TLSPolicyError",
     "TooManyRedirects",
     "TransportError",
     "UnsupportedProtocol",
@@ -203,6 +205,26 @@ class ProxyError(TransportError):
     """
     An error occurred while establishing a proxy connection.
     """
+
+
+class TLSPolicyError(TransportError):
+    """
+    The TLS policy resolver failed to resolve a policy for the target
+    origin, or returned an invalid policy.
+
+    This exception is raised before any connection attempt is made, so the
+    request never reaches the network.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        origin: typing.Any | None = None,
+        request: Request | None = None,
+    ) -> None:
+        super().__init__(message, request=request)
+        self.origin = origin
 
 
 class UnsupportedProtocol(TransportError):

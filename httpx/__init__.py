@@ -7,6 +7,7 @@ from ._content import *
 from ._exceptions import *
 from ._models import *
 from ._status_codes import *
+from ._tls import *
 from ._transports import *
 from ._types import *
 from ._urls import *
@@ -65,6 +66,7 @@ __all__ = [
     "NetRCAuth",
     "NetworkError",
     "options",
+    "Origin",
     "patch",
     "PoolTimeout",
     "post",
@@ -89,6 +91,9 @@ __all__ = [
     "SyncByteStream",
     "Timeout",
     "TimeoutException",
+    "TLSPolicy",
+    "TLSPolicyError",
+    "TLSPolicyResolver",
     "TooManyRedirects",
     "TransportError",
     "UnsupportedProtocol",

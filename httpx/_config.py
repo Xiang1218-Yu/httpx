@@ -24,22 +24,85 @@ def create_ssl_context(
     verify: ssl.SSLContext | str | bool = True,
     cert: CertTypes | None = None,
     trust_env: bool = True,
+    *,
+    alpn_protocols: typing.Sequence[str] | None = None,
 ) -> ssl.SSLContext:
     import ssl
+    import sys
     import warnings
 
     import certifi
 
+    if alpn_protocols is not None and isinstance(verify, ssl.SSLContext):
+        raise ValueError(
+            "Cannot pin `alpn_protocols` on a pre-configured `ssl.SSLContext`. "
+            "Call `set_alpn_protocols()` on the context itself instead."
+        )
+
+    if alpn_protocols is None:
+        # Construct the context using the standard library helper, so that we
+        # remain byte-for-byte compatible with the historical behaviour.
+        def new_context(
+            cafile: str | None = None, capath: str | None = None
+        ) -> ssl.SSLContext:
+            return ssl.create_default_context(cafile=cafile, capath=capath)
+
+        pinned_context: typing.Callable[[], ssl.SSLContext] | None = None
+    else:
+        pinned_alpn_protocols: typing.Sequence[str] = alpn_protocols
+
+        class _PinnedALPNSSLContext(ssl.SSLContext):
+            """
+            An SSL context whose ALPN protocol list is pinned at construction
+            time. `httpcore` re-applies its own default ALPN list on every
+            connection handshake, so we override `set_alpn_protocols` to keep
+            the explicitly configured list in place instead.
+            """
+
+            def __new__(
+                cls, protocol: int = ssl.PROTOCOL_TLS_CLIENT
+            ) -> "_PinnedALPNSSLContext":
+                return super().__new__(cls, protocol)
+
+            def __init__(
+                self, protocol: int = ssl.PROTOCOL_TLS_CLIENT
+            ) -> None:
+                if sys.version_info < (3, 14):
+                    # Prior to Python 3.14 the context is initialised in
+                    # `__init__`; 3.14 onwards performs the initialisation in
+                    # `__new__` and `object.__init__` rejects arguments.
+                    super().__init__(protocol)
+                self._pinned_alpn_protocols = list(pinned_alpn_protocols)
+                super().set_alpn_protocols(self._pinned_alpn_protocols)
+
+            def set_alpn_protocols(
+                self, values: typing.Iterable[str]
+            ) -> None:
+                super().set_alpn_protocols(self._pinned_alpn_protocols)
+
+        def new_context(
+            cafile: str | None = None, capath: str | None = None
+        ) -> ssl.SSLContext:
+            ctx = _PinnedALPNSSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            if cafile is not None or capath is not None:
+                ctx.load_verify_locations(cafile=cafile, capath=capath)
+            return ctx
+
+        pinned_context = new_context
+
     if verify is True:
         if trust_env and os.environ.get("SSL_CERT_FILE"):  # pragma: nocover
-            ctx = ssl.create_default_context(cafile=os.environ["SSL_CERT_FILE"])
+            ctx = new_context(cafile=os.environ["SSL_CERT_FILE"])
         elif trust_env and os.environ.get("SSL_CERT_DIR"):  # pragma: nocover
-            ctx = ssl.create_default_context(capath=os.environ["SSL_CERT_DIR"])
+            ctx = new_context(capath=os.environ["SSL_CERT_DIR"])
         else:
             # Default case...
-            ctx = ssl.create_default_context(cafile=certifi.where())
+            ctx = new_context(cafile=certifi.where())
     elif verify is False:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if pinned_context is None:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        else:
+            ctx = pinned_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     elif isinstance(verify, str):  # pragma: nocover
@@ -50,8 +113,8 @@ def create_ssl_context(
         )
         warnings.warn(message, DeprecationWarning)
         if os.path.isdir(verify):
-            return ssl.create_default_context(capath=verify)
-        return ssl.create_default_context(cafile=verify)
+            return new_context(capath=verify)
+        return new_context(cafile=verify)
     else:
         ctx = verify
 

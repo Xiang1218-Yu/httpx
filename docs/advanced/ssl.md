@@ -73,6 +73,39 @@ client = httpx.Client(verify=ctx)
 
 `httpx` does respect the `SSL_CERT_FILE` and `SSL_CERT_DIR` environment variables by default. For details, refer to [the section on the environment variables page](../environment_variables.md#ssl_cert_file).
 
+### Per-origin TLS policies
+
+For multi-tenant clients that need to select the CA bundle, client certificate, ALPN protocols, or hostname verification strategy dynamically, pass a TLS policy resolver to the client.
+
+A resolver subclasses `httpx.TLSPolicyResolver` and implements `resolve(origin)`, which is called with the target `httpx.Origin` of each request, *before* any connection is made. It returns an `httpx.TLSPolicy` carrying the `SSLContext`, an optional `http2` flag (which drives ALPN negotiation), and a hashable `key` that identifies equivalent policies...
+
+```python
+import httpx
+import ssl
+
+
+class TenantTLSPolicyResolver(httpx.TLSPolicyResolver):
+    def resolve(self, origin: httpx.Origin) -> httpx.TLSPolicy:
+        tenant = self._lookup_tenant(origin.host)
+        ctx = ssl.create_default_context(cafile=tenant.ca_bundle)
+        ctx.load_cert_chain(certfile=tenant.client_cert)
+        # Equal keys share a connection pool; a different key (or a new
+        # resolver generation) creates a fresh pool.
+        return httpx.TLSPolicy(ctx, http2=False, key=(tenant.id, tenant.version))
+
+    def _lookup_tenant(self, host: str):
+        ...
+
+
+client = httpx.Client(tls_policy=TenantTLSPolicyResolver())
+```
+
+You can also construct a policy from the same `verify`, `cert`, `trust_env`, `alpn_protocols` and `check_hostname` primitives that the client accepts, using `httpx.TLSPolicy.create(...)`.
+
+Connections are pooled per `(resolver generation, policy key)`, so a connection negotiated for one policy is never reused for a different one. When configured policies change, call `resolver.invalidate()` to bump the generation: subsequent requests resolve fresh policies and use new pools, while pools from older generations are closed as soon as any in-flight requests have drained, including requests that were mid-handshake. Redirected requests resolve the policy for the new origin on every hop.
+
+If resolution fails, an `httpx.TLSPolicyError` is raised before the connection is attempted. The resolver works for both direct connections and HTTP/SOCKS proxies, for `Client` and `AsyncClient` (async resolvers may additionally implement `aresolve(origin)`), and cannot be combined with a custom `transport=` instance — pass `tls_policy` to an `httpx.HTTPTransport` instead.
+
 ### Making HTTPS requests to a local server
 
 When making requests to local servers, such as a development server running on `localhost`, you will typically be using unencrypted HTTP connections.
