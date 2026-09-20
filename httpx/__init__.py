@@ -45,6 +45,7 @@ __all__ = [
     "ConnectError",
     "ConnectTimeout",
     "CookieConflict",
+    "CookiePartitions",
     "Cookies",
     "create_ssl_context",
     "DecodingError",

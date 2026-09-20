@@ -5,6 +5,7 @@ import datetime
 import email.message
 import json as jsonlib
 import re
+import threading
 import typing
 import urllib.request
 from collections.abc import Mapping
@@ -48,7 +49,7 @@ from ._types import (
 from ._urls import URL
 from ._utils import to_bytes_or_str, to_str
 
-__all__ = ["Cookies", "Headers", "Request", "Response"]
+__all__ = ["CookiePartitions", "Cookies", "Headers", "Request", "Response"]
 
 SENSITIVE_HEADERS = {"authorization", "proxy-authorization"}
 
@@ -1275,3 +1276,87 @@ class Cookies(typing.MutableMapping[str, str]):
                 # https://docs.python.org/3/library/email.compat32-message.html#email.message.Message.__setitem__
                 info[key] = value
             return info
+
+
+class CookiePartitions:
+    """
+    Manages isolated cookie stores ("partitions"), each keyed by a
+    context identifier, such as a tenant ID.
+
+    Cookie selection, `Set-Cookie` updates -- including domain, path and
+    expiry changes -- are always scoped to a single partition. Every
+    operation is lock-protected, so a client can safely issue requests
+    for different contexts from concurrent sync threads or async tasks.
+    """
+
+    def __init__(self) -> None:
+        self._jars: dict[str, Cookies] = {}
+        self._lock = threading.RLock()
+
+    def get(self, context: str) -> Cookies:
+        """
+        Return the live cookie jar for a context, creating an empty
+        partition if necessary.
+        """
+        with self._lock:
+            jar = self._jars.get(context)
+            if jar is None:
+                jar = Cookies()
+                self._jars[context] = jar
+            return jar
+
+    def snapshot(self, context: str) -> Cookies:
+        """
+        Return an independent copy of a partition's cookies, used to
+        determine the `Cookie:` header for a single outgoing request.
+        """
+        with self._lock:
+            return Cookies(self.get(context))
+
+    def extract_cookies(self, context: str, response: Response) -> None:
+        """
+        Update a partition based on the response's `Set-Cookie` headers.
+        """
+        with self._lock:
+            self.get(context).extract_cookies(response)
+
+    def delete(self, context: str) -> None:
+        """
+        Drop a partition entirely. Its cookies can never be selected by
+        any subsequent request, including requests that reuse the same
+        identifier.
+        """
+        with self._lock:
+            jar = self._jars.pop(context, None)
+            if jar is not None:
+                jar.clear()
+
+    def clear(self) -> None:
+        """
+        Drop every partition.
+        """
+        with self._lock:
+            for jar in self._jars.values():
+                jar.clear()
+            self._jars.clear()
+
+    def __getitem__(self, context: str) -> Cookies:
+        with self._lock:
+            return self._jars[context]
+
+    def __contains__(self, context: object) -> bool:
+        with self._lock:
+            return context in self._jars
+
+    def __iter__(self) -> typing.Iterator[str]:
+        with self._lock:
+            return iter(list(self._jars))
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._jars)
+
+    def __repr__(self) -> str:
+        with self._lock:
+            contexts = ", ".join(repr(key) for key in self._jars)
+        return f"<CookiePartitions[{contexts}]>"
