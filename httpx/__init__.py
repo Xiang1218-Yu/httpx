@@ -6,6 +6,7 @@ from ._config import *
 from ._content import *
 from ._exceptions import *
 from ._models import *
+from ._signatures import *
 from ._status_codes import *
 from ._transports import *
 from ._types import *
@@ -44,12 +45,14 @@ __all__ = [
     "codes",
     "ConnectError",
     "ConnectTimeout",
+    "ContentDigestError",
     "CookieConflict",
     "Cookies",
     "create_ssl_context",
     "DecodingError",
     "delete",
     "DigestAuth",
+    "DuplicateNonce",
     "FunctionAuth",
     "get",
     "head",
@@ -57,10 +60,13 @@ __all__ = [
     "HTTPError",
     "HTTPStatusError",
     "HTTPTransport",
+    "InvalidSignature",
     "InvalidURL",
+    "KeyResolver",
     "Limits",
     "LocalProtocolError",
     "main",
+    "MessageSigner",
     "MockTransport",
     "NetRCAuth",
     "NetworkError",
@@ -82,6 +88,11 @@ __all__ = [
     "RequestNotRead",
     "Response",
     "ResponseNotRead",
+    "SignatureError",
+    "SignatureExpired",
+    "SignatureNotYetValid",
+    "SignatureSigningError",
+    "StaticKeyResolver",
     "stream",
     "StreamClosed",
     "StreamConsumed",

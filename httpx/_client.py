@@ -27,6 +27,7 @@ from ._exceptions import (
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
+from ._signatures import MessageSigner
 from ._status_codes import codes
 from ._transports.base import AsyncBaseTransport, BaseTransport
 from ._transports.default import AsyncHTTPTransport, HTTPTransport
@@ -200,11 +201,13 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        message_signature: MessageSigner | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
 
         self._base_url = self._enforce_trailing_slash(URL(base_url))
 
+        self._message_signature = message_signature
         self._auth = self._build_auth(auth)
         self._params = QueryParams(params)
         self.headers = Headers(headers)
@@ -658,6 +661,7 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        message_signature: MessageSigner | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,6 +675,7 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            message_signature=message_signature,
         )
 
         if http2:
@@ -976,8 +981,16 @@ class Client(BaseClient):
             for hook in self._event_hooks["request"]:
                 hook(request)
 
+            if self._message_signature is not None:
+                with request_context(request=request):
+                    self._message_signature.sign_request(request)
+
             response = self._send_single_request(request)
             try:
+                if self._message_signature is not None:
+                    with request_context(request=request):
+                        self._message_signature.verify_response(response)
+
                 for hook in self._event_hooks["response"]:
                     hook(response)
                 response.history = list(history)
@@ -1372,6 +1385,7 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        message_signature: MessageSigner | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,6 +1399,7 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            message_signature=message_signature,
         )
 
         if http2:
@@ -1691,8 +1706,16 @@ class AsyncClient(BaseClient):
             for hook in self._event_hooks["request"]:
                 await hook(request)
 
+            if self._message_signature is not None:
+                with request_context(request=request):
+                    await self._message_signature.asign_request(request)
+
             response = await self._send_single_request(request)
             try:
+                if self._message_signature is not None:
+                    with request_context(request=request):
+                        await self._message_signature.averify_response(response)
+
                 for hook in self._event_hooks["response"]:
                     await hook(response)
 
